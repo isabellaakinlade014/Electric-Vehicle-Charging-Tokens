@@ -9,9 +9,13 @@
 (define-constant err-session-not-found (err u105))
 (define-constant err-session-already-ended (err u106))
 (define-constant err-unauthorized (err u107))
+(define-constant err-insufficient-points (err u108))
+(define-constant err-invalid-tier (err u109))
+(define-constant err-pricing-disabled (err u110))
 
 (define-data-var total-supply uint u0)
 (define-data-var token-price uint u1000000)
+(define-data-var points-to-token-ratio uint u100)
 
 (define-map station-registry
     { station-id: uint }
@@ -21,6 +25,11 @@
         price-per-kwh: uint,
         is-active: bool,
         total-sessions: uint,
+        base-price: uint,
+        dynamic-pricing-enabled: bool,
+        peak-multiplier: uint,
+        sessions-last-24h: uint,
+        last-demand-update: uint,
     }
 )
 
@@ -40,6 +49,15 @@
 (define-map user-balances
     { user: principal }
     { balance: uint }
+)
+
+(define-map user-loyalty
+    { user: principal }
+    {
+        points: uint,
+        total-sessions: uint,
+        tier: uint,
+    }
 )
 
 (define-data-var next-station-id uint u1)
@@ -63,6 +81,29 @@
 
 (define-read-only (get-session-info (session-id uint))
     (map-get? charging-sessions { session-id: session-id })
+)
+
+(define-read-only (get-user-loyalty (user principal))
+    (default-to {
+        points: u0,
+        total-sessions: u0,
+        tier: u1,
+    }
+        (map-get? user-loyalty { user: user })
+    )
+)
+
+(define-read-only (get-loyalty-tier-multiplier (tier uint))
+    (if (is-eq tier u1)
+        u1
+        (if (is-eq tier u2)
+            u2
+            (if (is-eq tier u3)
+                u3
+                u1
+            )
+        )
+    )
 )
 
 (define-read-only (get-active-stations)
@@ -123,6 +164,11 @@
             price-per-kwh: price-per-kwh,
             is-active: true,
             total-sessions: u0,
+            base-price: price-per-kwh,
+            dynamic-pricing-enabled: false,
+            peak-multiplier: u150,
+            sessions-last-24h: u0,
+            last-demand-update: stacks-block-height,
         })
         (var-set next-station-id (+ station-id u1))
         (ok station-id)
@@ -214,8 +260,37 @@
             })
         )
 
-        (map-set station-registry { station-id: (get station-id session) }
-            (merge station { total-sessions: (+ (get total-sessions station) u1) })
+        (let ((updated-station (merge station { total-sessions: (+ (get total-sessions station) u1) })))
+            (map-set station-registry { station-id: (get station-id session) }
+                (if (get dynamic-pricing-enabled updated-station)
+                    (merge updated-station {
+                        sessions-last-24h: (+ (get sessions-last-24h updated-station) u1),
+                        last-demand-update: stacks-block-height,
+                    })
+                    updated-station
+                ))
+        )
+
+        (let ((loyalty-data (get-user-loyalty tx-sender)))
+            (let (
+                    (base-points (* kwh-consumed u10))
+                    (tier-multiplier (get-loyalty-tier-multiplier (get tier loyalty-data)))
+                    (points-earned (* base-points tier-multiplier))
+                    (new-total-sessions (+ (get total-sessions loyalty-data) u1))
+                    (new-tier (if (<= new-total-sessions u10)
+                        u1
+                        (if (<= new-total-sessions u25)
+                            u2
+                            u3
+                        )
+                    ))
+                )
+                (map-set user-loyalty { user: tx-sender } {
+                    points: (+ (get points loyalty-data) points-earned),
+                    total-sessions: new-total-sessions,
+                    tier: new-tier,
+                })
+            )
         )
 
         (ok total-cost)
@@ -386,5 +461,175 @@
             err-station-not-found
         )))
         (ok (get-balance (get owner station)))
+    )
+)
+
+(define-public (redeem-loyalty-points (points-to-redeem uint))
+    (let (
+            (loyalty-data (get-user-loyalty tx-sender))
+            (available-points (get points loyalty-data))
+            (tokens-to-mint (/ points-to-redeem (var-get points-to-token-ratio)))
+        )
+        (asserts! (>= available-points points-to-redeem) err-insufficient-points)
+        (asserts! (> tokens-to-mint u0) err-invalid-amount)
+        (asserts! (> points-to-redeem u0) err-invalid-amount)
+
+        (map-set user-loyalty { user: tx-sender }
+            (merge loyalty-data { points: (- available-points points-to-redeem) })
+        )
+
+        (try! (mint-tokens tokens-to-mint tx-sender))
+        (ok tokens-to-mint)
+    )
+)
+
+(define-public (set-points-ratio (new-ratio uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> new-ratio u0) err-invalid-amount)
+        (var-set points-to-token-ratio new-ratio)
+        (ok new-ratio)
+    )
+)
+
+(define-read-only (calculate-points-for-kwh
+        (kwh-amount uint)
+        (user principal)
+    )
+    (let (
+            (loyalty-data (get-user-loyalty user))
+            (tier-multiplier (get-loyalty-tier-multiplier (get tier loyalty-data)))
+            (base-points (* kwh-amount u10))
+        )
+        (ok (* base-points tier-multiplier))
+    )
+)
+
+(define-public (enable-dynamic-pricing
+        (station-id uint)
+        (peak-multiplier uint)
+    )
+    (let ((station (unwrap! (map-get? station-registry { station-id: station-id })
+            err-station-not-found
+        )))
+        (asserts! (is-eq tx-sender (get owner station)) err-unauthorized)
+        (asserts! (and (>= peak-multiplier u100) (<= peak-multiplier u300))
+            err-invalid-amount
+        )
+        (map-set station-registry { station-id: station-id }
+            (merge station {
+                dynamic-pricing-enabled: true,
+                peak-multiplier: peak-multiplier,
+                sessions-last-24h: u0,
+                last-demand-update: stacks-block-height,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (disable-dynamic-pricing (station-id uint))
+    (let ((station (unwrap! (map-get? station-registry { station-id: station-id })
+            err-station-not-found
+        )))
+        (asserts! (is-eq tx-sender (get owner station)) err-unauthorized)
+        (map-set station-registry { station-id: station-id }
+            (merge station {
+                dynamic-pricing-enabled: false,
+                price-per-kwh: (get base-price station),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (update-dynamic-pricing (station-id uint))
+    (let (
+            (station (unwrap! (map-get? station-registry { station-id: station-id })
+                err-station-not-found
+            ))
+            (current-block stacks-block-height)
+            (blocks-since-update (- current-block (get last-demand-update station)))
+        )
+        (asserts! (get dynamic-pricing-enabled station) err-pricing-disabled)
+        (asserts! (> blocks-since-update u144) err-invalid-amount)
+
+        (let (
+                (demand-factor (if (> (get sessions-last-24h station) u10)
+                    u2
+                    u1
+                ))
+                (peak-hour (is-peak-hour current-block))
+                (base-price (get base-price station))
+                (multiplier (if peak-hour
+                    (get peak-multiplier station)
+                    u100
+                ))
+                (new-price (/ (* base-price multiplier demand-factor) u100))
+            )
+            (map-set station-registry { station-id: station-id }
+                (merge station {
+                    price-per-kwh: new-price,
+                    sessions-last-24h: u0,
+                    last-demand-update: current-block,
+                })
+            )
+            (ok new-price)
+        )
+    )
+)
+
+(define-read-only (is-peak-hour (current-block uint))
+    (let ((hour-of-day (mod current-block u144)))
+        (or
+            (and (>= hour-of-day u72) (<= hour-of-day u108))
+            (and (>= hour-of-day u126) (<= hour-of-day u144))
+        )
+    )
+)
+
+(define-read-only (get-current-price
+        (station-id uint)
+        (kwh-amount uint)
+    )
+    (let (
+            (station (unwrap! (map-get? station-registry { station-id: station-id })
+                err-station-not-found
+            ))
+            (current-block stacks-block-height)
+        )
+        (if (get dynamic-pricing-enabled station)
+            (let (
+                    (demand-factor (if (> (get sessions-last-24h station) u10)
+                        u2
+                        u1
+                    ))
+                    (peak-hour (is-peak-hour current-block))
+                    (base-price (get base-price station))
+                    (multiplier (if peak-hour
+                        (get peak-multiplier station)
+                        u100
+                    ))
+                    (adjusted-price (/ (* base-price multiplier demand-factor) u100))
+                )
+                (ok (* kwh-amount adjusted-price))
+            )
+            (ok (* kwh-amount (get price-per-kwh station)))
+        )
+    )
+)
+
+(define-read-only (get-pricing-info (station-id uint))
+    (let ((station (unwrap! (map-get? station-registry { station-id: station-id })
+            err-station-not-found
+        )))
+        (ok {
+            base-price: (get base-price station),
+            current-price: (get price-per-kwh station),
+            dynamic-enabled: (get dynamic-pricing-enabled station),
+            peak-multiplier: (get peak-multiplier station),
+            demand-sessions: (get sessions-last-24h station),
+            is-peak-now: (is-peak-hour stacks-block-height),
+        })
     )
 )
