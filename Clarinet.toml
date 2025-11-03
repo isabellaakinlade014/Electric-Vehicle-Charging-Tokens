@@ -9,6 +9,10 @@ requirements = []
 path = 'contracts/Electric-Vehicle-Charging-Tokens.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.charging-session-registry]
+path = 'contracts/charging-session-registry.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
