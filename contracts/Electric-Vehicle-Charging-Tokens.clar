@@ -647,12 +647,12 @@
 (define-map user-subscriptions
     { user: principal }
     {
-        plan-type: uint,        ;; 1=monthly, 2=yearly, 3=premium-yearly
+        plan-type: uint, ;; 1=monthly, 2=yearly, 3=premium-yearly
         start-block: uint,
         end-block: uint,
         kwh-allowance: uint,
         kwh-used: uint,
-        discount-rate: uint,    ;; percentage discount (10=10%)
+        discount-rate: uint, ;; percentage discount (10=10%)
         auto-renew: bool,
         is-active: bool,
     }
@@ -662,10 +662,10 @@
     { plan-id: uint }
     {
         name: (string-ascii 50),
-        duration-blocks: uint,   ;; blocks duration
-        kwh-allowance: uint,     ;; kWh included
-        token-cost: uint,        ;; cost in tokens
-        discount-rate: uint,     ;; discount percentage
+        duration-blocks: uint, ;; blocks duration
+        kwh-allowance: uint, ;; kWh included
+        token-cost: uint, ;; cost in tokens
+        discount-rate: uint, ;; discount percentage
         is-available: bool,
     }
 )
@@ -676,28 +676,28 @@
 ;; Initialize default subscription plans
 (map-set subscription-plans { plan-id: u1 } {
     name: "Monthly Basic",
-    duration-blocks: u4320,    ;; ~30 days
+    duration-blocks: u4320, ;; ~30 days
     kwh-allowance: u100,
     token-cost: u1000,
-    discount-rate: u15,        ;; 15% discount
+    discount-rate: u15, ;; 15% discount
     is-available: true,
 })
 
 (map-set subscription-plans { plan-id: u2 } {
     name: "Yearly Standard",
-    duration-blocks: u52560,   ;; ~365 days
+    duration-blocks: u52560, ;; ~365 days
     kwh-allowance: u1500,
     token-cost: u10000,
-    discount-rate: u25,        ;; 25% discount
+    discount-rate: u25, ;; 25% discount
     is-available: true,
 })
 
 (map-set subscription-plans { plan-id: u3 } {
     name: "Premium Yearly",
-    duration-blocks: u52560,   ;; ~365 days
+    duration-blocks: u52560, ;; ~365 days
     kwh-allowance: u3000,
     token-cost: u18000,
-    discount-rate: u35,        ;; 35% discount
+    discount-rate: u35, ;; 35% discount
     is-available: true,
 })
 
@@ -714,40 +714,37 @@
 
 (define-read-only (is-subscription-active (user principal))
     (match (map-get? user-subscriptions { user: user })
-        subscription
-            (and 
-                (get is-active subscription)
-                (> (get end-block subscription) stacks-block-height)
-            )
+        subscription (and
+            (get is-active subscription)
+            (> (get end-block subscription) stacks-block-height)
+        )
         false
     )
 )
 
 (define-read-only (get-subscription-discount (user principal))
     (match (map-get? user-subscriptions { user: user })
-        subscription
-            (if (and 
-                    (get is-active subscription)
-                    (> (get end-block subscription) stacks-block-height)
-                    (< (get kwh-used subscription) (get kwh-allowance subscription))
-                )
-                (get discount-rate subscription)
-                u0
+        subscription (if (and
+                (get is-active subscription)
+                (> (get end-block subscription) stacks-block-height)
+                (< (get kwh-used subscription) (get kwh-allowance subscription))
             )
+            (get discount-rate subscription)
+            u0
+        )
         u0
     )
 )
 
 (define-read-only (get-remaining-kwh (user principal))
     (match (map-get? user-subscriptions { user: user })
-        subscription
-            (if (and 
-                    (get is-active subscription)
-                    (> (get end-block subscription) stacks-block-height)
-                )
-                (- (get kwh-allowance subscription) (get kwh-used subscription))
-                u0
+        subscription (if (and
+                (get is-active subscription)
+                (> (get end-block subscription) stacks-block-height)
             )
+            (- (get kwh-allowance subscription) (get kwh-used subscription))
+            u0
+        )
         u0
     )
 )
@@ -772,23 +769,23 @@
         (asserts! (>= (get-balance tx-sender) (get token-cost plan))
             err-insufficient-balance
         )
-        
+
         ;; Check if user already has active subscription
         (match existing-sub
             current-sub
-                (asserts! 
-                    (or 
-                        (not (get is-active current-sub))
-                        (<= (get end-block current-sub) stacks-block-height)
-                    )
-                    err-subscription-already-active
+            (asserts!
+                (or
+                    (not (get is-active current-sub))
+                    (<= (get end-block current-sub) stacks-block-height)
                 )
+                err-subscription-already-active
+            )
             true ;; No existing subscription, proceed
         )
-        
+
         ;; Burn tokens for subscription cost
         (try! (burn-tokens (get token-cost plan)))
-        
+
         ;; Create or update subscription
         (map-set user-subscriptions { user: tx-sender } {
             plan-type: plan-id,
@@ -800,73 +797,69 @@
             auto-renew: false,
             is-active: true,
         })
-        
+
         ;; Update revenue tracking
-        (var-set subscription-revenue 
+        (var-set subscription-revenue
             (+ (var-get subscription-revenue) (get token-cost plan))
         )
-        
+
         (ok plan-id)
     )
 )
 
 (define-public (cancel-subscription)
-    (let (
-            (subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
-                err-subscription-not-found
-            ))
-        )
+    (let ((subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
+            err-subscription-not-found
+        )))
         (asserts! (get is-active subscription) err-subscription-not-found)
-        
+
         ;; Deactivate subscription
         (map-set user-subscriptions { user: tx-sender }
             (merge subscription { is-active: false })
         )
-        
+
         (ok true)
     )
 )
 
 (define-public (toggle-auto-renew)
-    (let (
-            (subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
-                err-subscription-not-found
-            ))
-        )
+    (let ((subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
+            err-subscription-not-found
+        )))
         (asserts! (get is-active subscription) err-subscription-not-found)
-        
+
         ;; Toggle auto-renew setting
         (map-set user-subscriptions { user: tx-sender }
             (merge subscription { auto-renew: (not (get auto-renew subscription)) })
         )
-        
+
         (ok (not (get auto-renew subscription)))
     )
 )
 
 (define-public (use-subscription-kwh (kwh-amount uint))
-    (let (
-            (subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
-                err-subscription-not-found
-            ))
-        )
+    (let ((subscription (unwrap! (map-get? user-subscriptions { user: tx-sender })
+            err-subscription-not-found
+        )))
         (asserts! (get is-active subscription) err-subscription-expired)
         (asserts! (> (get end-block subscription) stacks-block-height)
             err-subscription-expired
         )
-        (asserts! 
-            (>= (- (get kwh-allowance subscription) (get kwh-used subscription)) kwh-amount)
+        (asserts!
+            (>= (- (get kwh-allowance subscription) (get kwh-used subscription))
+                kwh-amount
+            )
             err-insufficient-usage
         )
-        
+
         ;; Update kWh usage
         (map-set user-subscriptions { user: tx-sender }
-            (merge subscription { 
-                kwh-used: (+ (get kwh-used subscription) kwh-amount) 
-            })
+            (merge subscription { kwh-used: (+ (get kwh-used subscription) kwh-amount) })
         )
-        
-        (ok (- (get kwh-allowance subscription) (get kwh-used subscription) kwh-amount))
+
+        (ok (- (get kwh-allowance subscription) (get kwh-used subscription)
+            kwh-amount
+        ))
     )
 )
 
@@ -879,13 +872,18 @@
     )
     (let ((plan-id (var-get next-plan-id)))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (asserts! (and (> duration-blocks u0) (> kwh-allowance u0) (> token-cost u0))
+        (asserts!
+            (and
+                (> duration-blocks u0)
+                (> kwh-allowance u0)
+                (> token-cost u0)
+            )
             err-invalid-amount
         )
         (asserts! (and (>= discount-rate u0) (<= discount-rate u50))
             err-invalid-amount
         )
-        
+
         (map-set subscription-plans { plan-id: plan-id } {
             name: name,
             duration-blocks: duration-blocks,
@@ -894,24 +892,22 @@
             discount-rate: discount-rate,
             is-available: true,
         })
-        
+
         (var-set next-plan-id (+ plan-id u1))
         (ok plan-id)
     )
 )
 
 (define-public (toggle-plan-availability (plan-id uint))
-    (let (
-            (plan (unwrap! (map-get? subscription-plans { plan-id: plan-id })
-                err-invalid-plan
-            ))
-        )
+    (let ((plan (unwrap! (map-get? subscription-plans { plan-id: plan-id })
+            err-invalid-plan
+        )))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        
+
         (map-set subscription-plans { plan-id: plan-id }
             (merge plan { is-available: (not (get is-available plan)) })
         )
-        
+
         (ok (not (get is-available plan)))
     )
 )
@@ -923,7 +919,7 @@
     })
 )
 
-(define-read-only (calculate-discounted-price 
+(define-read-only (calculate-discounted-price
         (base-price uint)
         (user principal)
     )
@@ -937,21 +933,20 @@
 
 (define-read-only (get-subscription-status (user principal))
     (match (map-get? user-subscriptions { user: user })
-        subscription
-            (ok {
-                is-active: (and 
-                    (get is-active subscription)
-                    (> (get end-block subscription) stacks-block-height)
-                ),
-                plan-type: (get plan-type subscription),
-                blocks-remaining: (if (> (get end-block subscription) stacks-block-height)
-                    (- (get end-block subscription) stacks-block-height)
-                    u0
-                ),
-                kwh-remaining: (- (get kwh-allowance subscription) (get kwh-used subscription)),
-                discount-rate: (get discount-rate subscription),
-                auto-renew: (get auto-renew subscription),
-            })
+        subscription (ok {
+            is-active: (and
+                (get is-active subscription)
+                (> (get end-block subscription) stacks-block-height)
+            ),
+            plan-type: (get plan-type subscription),
+            blocks-remaining: (if (> (get end-block subscription) stacks-block-height)
+                (- (get end-block subscription) stacks-block-height)
+                u0
+            ),
+            kwh-remaining: (- (get kwh-allowance subscription) (get kwh-used subscription)),
+            discount-rate: (get discount-rate subscription),
+            auto-renew: (get auto-renew subscription),
+        })
         (err err-subscription-not-found)
     )
 )
